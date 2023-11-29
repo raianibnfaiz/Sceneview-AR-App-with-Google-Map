@@ -3,6 +3,7 @@ package com.raian.arfoodmenu
 
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -45,6 +46,8 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
+import com.raian.arfoodmenu.api.NearbyPlacesResponse
+import com.raian.arfoodmenu.api.PlacesService
 import com.raian.arfoodmenu.ui.theme.ARFoodMenuTheme
 import io.github.sceneview.ar.ARScene
 import io.github.sceneview.ar.getDescription
@@ -62,17 +65,21 @@ import io.github.sceneview.rememberModelLoader
 import io.github.sceneview.rememberNodes
 import io.github.sceneview.rememberOnGestureListener
 import io.github.sceneview.rememberView
+import retrofit2.Call
+import retrofit2.Callback
+import retrofit2.Response
 
 private const val kModelFile = "damaged_helmet.glb"
 private const val kMaxModelInstances = 10
-
+private const val TAG = "MainActivity"
 class MainActivity : ComponentActivity() {
     private lateinit var fusedLocationClient: FusedLocationProviderClient
     private lateinit var mapView: MapView
     private var currentLocation by mutableStateOf(LatLng(40.7128, -74.0060)) // Default to New York
-
+    private lateinit var placesService: PlacesService
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        placesService = PlacesService.create()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
         setContent {
@@ -240,7 +247,33 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 100
     }
+    private fun getNearbyPlaces(location: LatLng) {
+        val apiKey = "AIzaSyBxeQ3OAnwaRSmDTQ-hoWyeRkIhrzZYXJY"
+        placesService.nearbyPlaces(
+            apiKey = apiKey,
+            location = "${location.latitude},${location.longitude}",
+            radiusInMeters = 2000,
+            placeType = "restaurant" // Example type
+        ).enqueue(object : Callback<NearbyPlacesResponse> {
+            override fun onFailure(call: Call<NearbyPlacesResponse>, t: Throwable) {
+                Log.e("MainActivity", "Failed to get nearby places", t)
+            }
 
+            override fun onResponse(
+                call: Call<NearbyPlacesResponse>,
+                response: Response<NearbyPlacesResponse>
+            ) {
+                if (!response.isSuccessful) {
+                    Log.e("MainActivity", "Failed to get nearby places")
+                    return
+                }
+
+                val places = response.body()?.results ?: emptyList()
+                //Log.d("MainActivity", "Nearby Places: $places")
+                Log.d(TAG, "onResponse: \"Nearby Places: $places\"")
+            }
+        })
+    }
     private fun getCurrentLocation() {
         if (ActivityCompat.checkSelfPermission(
                 this,
@@ -269,6 +302,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updateMapLocation(location: LatLng) {
         currentLocation = location // Update the mutable state
+        getNearbyPlaces(currentLocation)
     }
 }
 
