@@ -1,9 +1,17 @@
 package com.raian.arfoodmenu
 
 
+import PlaceNode
+import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
+import android.hardware.Sensor
+import android.hardware.SensorManager
+import android.location.Location
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
@@ -14,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -24,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
@@ -46,13 +56,16 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Pose
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
+import com.google.ar.sceneform.rendering.ViewRenderable
 import com.raian.arfoodmenu.api.NearbyPlacesResponse
 import com.raian.arfoodmenu.api.PlacesService
+import com.raian.arfoodmenu.model.Place
 import com.raian.arfoodmenu.ui.theme.ARFoodMenuTheme
 import io.github.sceneview.ar.ARScene
 import io.github.sceneview.ar.getDescription
 import io.github.sceneview.ar.node.AnchorNode
 import io.github.sceneview.ar.rememberARCameraNode
+import io.github.sceneview.collision.Vector3
 import io.github.sceneview.loaders.MaterialLoader
 import io.github.sceneview.loaders.ModelLoader
 import io.github.sceneview.model.ModelInstance
@@ -68,20 +81,37 @@ import io.github.sceneview.rememberView
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
-
-private const val kModelFile = "damaged_helmet.glb"
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.random.Random
+private const val kModelFile = "map_marker.glb"
 private const val kMaxModelInstances = 10
 private const val TAG = "MainActivity"
+var nearbyPlaces by mutableStateOf<List<Place>>(emptyList())
+
 class MainActivity : ComponentActivity() {
+    private lateinit var sensorManager: SensorManager
+    private var accelerometer: Sensor? = null
+    private var magnetometer: Sensor? = null
     private lateinit var fusedLocationClient: FusedLocationProviderClient
-    private lateinit var mapView: MapView
     private var currentLocation by mutableStateOf(LatLng(40.7128, -74.0060)) // Default to New York
     private lateinit var placesService: PlacesService
+    private var places: List<Place>? = null
+    var cameraAltitude: Double? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        magnetometer = sensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
         placesService = PlacesService.create()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-
+        // Get the current location
+        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+            if (location != null) {
+                cameraAltitude = location.altitude // Altitude in meters above sea level
+            }
+        }
         setContent {
             ARFoodMenuTheme {
                 BoxWithConstraints(
@@ -98,6 +128,7 @@ class MainActivity : ComponentActivity() {
                     val view = rememberView(engine)
                     val collisionSystem = rememberCollisionSystem(view)
 
+                    var textView = TextView(this@MainActivity)
                     var planeRenderer by remember { mutableStateOf(false) }
                     var session by remember { mutableStateOf<com.google.ar.core.Session?>(null) }
                     var frame by remember { mutableStateOf<Frame?>(null) }
@@ -112,9 +143,12 @@ class MainActivity : ComponentActivity() {
                                 .height(arSceneHeight.dp)
                                 .fillMaxWidth()
                         ) {
-                            // Your ARScene implementation here
-                            // ...
-
+                            ViewRenderable.builder()
+                                .setView(this@MainActivity,TextView(this@MainActivity).apply {
+                                    text = "ARScene"
+                                    textSize = 100f
+                                    setTextColor(ColorStateList.valueOf(Color.White.toArgb()))
+                                })
                             ARScene(
                                 modifier = Modifier.fillMaxSize(),
                                 childNodes = childNodes,
@@ -141,51 +175,64 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onSessionUpdated = { _, updatedFrame ->
                                     frame = updatedFrame
-                                    // Rest of the onSessionUpdated code...
                                 },
                                 onGestureListener = rememberOnGestureListener(
                                     onSingleTapConfirmed = { _, _ ->
-                                        if (session != null && frame != null && frame!!.camera.trackingState == TrackingState.TRACKING) {
+                                        if (session != null && frame != null && frame?.camera?.trackingState == TrackingState.TRACKING) {
                                             val cameraPose = frame!!.camera.displayOrientedPose
-                                            val offsets = listOf(
-                                                Pose.makeTranslation(
-                                                    0f,
-                                                    0f,
-                                                    -1f
-                                                ), // In front of the camera
-                                                Pose.makeTranslation(
-                                                    0.5f,
-                                                    0f,
-                                                    -1f
-                                                ), // Right and in front of the camera
-                                                Pose.makeTranslation(
-                                                    -0.5f,
-                                                    0f,
-                                                    -1f
-                                                ) // Left and in front of the camera
-                                            )
-
-                                            offsets.forEach { offset ->
-                                                val anchorPose = cameraPose.compose(offset)
+                                            val nearbyPlaceCount = nearbyPlaces.size
+                                            val sortedPlaces = sortPlacesByDistance(currentLocation)
+                                            val cameraHeight = cameraPose.zAxis.indices
+                                            sortedPlaces.forEachIndexed { index, place ->
+                                                val scaleFactor =
+                                                    calculateScaleFactor(index, sortedPlaces.size)
+                                                val anchorPose =
+                                                    cameraPose.compose(getOffset(scaleFactor))
                                                 val anchor = session?.createAnchor(anchorPose)
+                                                // Generate anchors based on the nearby place count
+                                                /* for (i in 0 until nearbyPlaceCount) {
+                                                     val offset = getOffset(
+                                                         i,
+                                                         nearbyPlaceCount
+                                                     ) // Calculate offset for each anchor
+                                                     val anchorPose =
+                                                         cameraPose.compose(offset) // Adjust anchor position
+                                                     val anchor =
+                                                         session?.createAnchor(anchorPose)*/ // Create anchor
 
                                                 anchor?.let {
                                                     childNodes += createAnchorNode(
+                                                        context = this@MainActivity.applicationContext,
                                                         engine = engine,
                                                         modelLoader = modelLoader,
                                                         materialLoader = materialLoader,
                                                         modelInstances = modelInstances,
-                                                        anchor = it
+                                                        anchor = it,
+                                                        place = place
+
                                                     )
+                                                    ViewRenderable.builder()
+                                                        .setView(this@MainActivity, textView).build(engine).thenAccept{
+                                                            textView = it.view as TextView
+                                                            textView.text = "Hello World!"
+                                                            textView.setTextColor( ColorStateList.valueOf(Color.Yellow.toArgb()))
+                                                            textView.textSize = 60f
+                                                            textView.backgroundTintList = ColorStateList.valueOf(Color.Blue.toArgb())
+                                                            textView.measure(100, 100)
+                                                            textView.layout(100, 100, 200, 200)
+                                                            textView.visibility = View.VISIBLE
+                                                            Log.d(TAG, "onActivate: ${it.view}")
+                                                        }
+                                                    addPlaces(engine)
+
                                                 }
                                             }
+
                                         }
                                     }
                                 )
 
-
                             )
-
                             Text(
                                 modifier = Modifier
                                     .systemBarsPadding()
@@ -203,9 +250,6 @@ class MainActivity : ComponentActivity() {
                                     stringResource(R.string.tap_anywhere_to_add_model)
                                 }
                             )
-
-                            // The rest of your ARScene related code
-                            // ...
                         }
 
                         // Google Map Box
@@ -247,6 +291,47 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 100
     }
+
+    fun addPlaces(engine: Engine) {
+        var textView = TextView(this@MainActivity)
+        ViewRenderable.builder()
+            .setView(this@MainActivity, textView).build(engine).thenAccept{
+                textView = it.view as TextView
+                textView.text = "Hello World!"
+                textView.setTextColor( ColorStateList.valueOf(Color.Yellow.toArgb()))
+                textView.textSize = 60f
+                textView.backgroundTintList = ColorStateList.valueOf(Color.Blue.toArgb())
+                textView.measure(100, 100)
+                textView.layout(100, 100, 200, 200)
+                textView.visibility = View.VISIBLE
+                Log.d(TAG, "onActivate: ${it.view}")
+            }
+        val currentLocation = currentLocation
+        if (currentLocation == null) {
+            Log.w(TAG, "Location has not been determined yet")
+            return
+        }
+
+        val places = places
+        if (places == null) {
+            Log.w(TAG, "No places to put")
+            return
+        }
+
+    }
+
+    /*
+        private fun getOffset(index: Int, totalAnchors: Int): Pose {
+            val radius = -1.5f // Adjust radius to control anchor distribution
+            val angle =
+                (Math.PI * 2) * (index / totalAnchors.toFloat()) // Calculate angle for each anchor
+            val x = radius * Math.cos(angle) // Calculate x-offset
+            val z = radius * Math.sin(angle) // Calculate z-offset
+
+            return Pose.makeTranslation(x.toFloat(), 0f, z.toFloat()) // Create offset pose
+        }
+    */
+
     private fun getNearbyPlaces(location: LatLng) {
         val apiKey = "AIzaSyBxeQ3OAnwaRSmDTQ-hoWyeRkIhrzZYXJY"
         placesService.nearbyPlaces(
@@ -269,11 +354,19 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val places = response.body()?.results ?: emptyList()
+                nearbyPlaces = places.map { it }
                 //Log.d("MainActivity", "Nearby Places: $places")
-                Log.d(TAG, "onResponse: \"Nearby Places: $places\"")
+                Log.d(TAG, "onResponse: \"Nearby Places:\" --> $nearbyPlaces")
+                for (place in nearbyPlaces) {
+                    Log.d(
+                        TAG,
+                        "addPlaces: place name: ${place.name} latlang--> ${place.geometry.location.latLng} ${place.geometry.location.latLng.latitude} longitude--> ${place.geometry.location.latLng.longitude}}"
+                    )
+                }
             }
         })
     }
+
     private fun getCurrentLocation() {
         if (ActivityCompat.checkSelfPermission(
                 this,
@@ -298,6 +391,7 @@ class MainActivity : ComponentActivity() {
                     updateMapLocation(LatLng(location.latitude, location.longitude))
                 }
             }
+        places = nearbyPlaces
     }
 
     private fun updateMapLocation(location: LatLng) {
@@ -306,6 +400,37 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+// Function to sort nearby places based on distance
+private fun sortPlacesByDistance(currentLocation: LatLng): List<Place> {
+    return nearbyPlaces.sortedBy { place ->
+        val results = FloatArray(1)
+        Location.distanceBetween(
+            currentLocation.latitude,
+            currentLocation.longitude,
+            place.geometry.location.latLng.latitude,
+            place.geometry.location.latLng.longitude,
+            results
+        )
+        results[0] // Distance
+    }
+}
+
+// Function to calculate offset based on scale factor
+private fun getOffset(scaleFactor: Float): Pose {
+    val radius = scaleFactor * -1.5f // Scale the radius
+    val angle = Random.nextDouble(0.0, 2 * Math.PI) // Randomize angle for natural distribution
+    val x = radius * cos(angle).toFloat()
+    val z = radius * sin(angle).toFloat()
+    return Pose.makeTranslation(x, 0f, z)
+}
+
+
+// Function to calculate scale factor
+private fun calculateScaleFactor(index: Int, totalPlaces: Int): Float {
+    // Scale factor logic (e.g., linear, logarithmic, etc.)
+    // Example: linear scaling
+    return 1f + (index.toFloat() / totalPlaces)
+}
 
 @Composable
 fun GoogleMapComponent(currentLocation: LatLng) {
@@ -342,6 +467,7 @@ fun rememberMapViewWithLifecycle(): MapView {
     return mapView
 }
 
+
 fun getMapLifecycleObserver(mapView: MapView): LifecycleEventObserver =
     LifecycleEventObserver { _, event ->
         when (event) {
@@ -357,11 +483,13 @@ fun getMapLifecycleObserver(mapView: MapView): LifecycleEventObserver =
 
 //create anchore
 private fun createAnchorNode(
+    context: Context,
     engine: Engine,
     modelLoader: ModelLoader,
     materialLoader: MaterialLoader,
     modelInstances: MutableList<ModelInstance>,
-    anchor: Anchor
+    anchor: Anchor,
+    place: Place
 ): AnchorNode {
     val anchorNode = AnchorNode(engine = engine, anchor = anchor)
     val modelNode = ModelNode(
@@ -382,14 +510,31 @@ private fun createAnchorNode(
     ).apply {
         isVisible = false
     }
+    /*
+       val item =  ViewRenderable.builder()
+            .setView(context,TextView(context).apply {
+                text = "ARScene"
+                textSize = 100f
+                setTextColor(ColorStateList.valueOf(Color.White.toArgb()))
+            })*/
+    val placeNode = PlaceNode(context, engine)
+    placeNode.setPosition(Vector3(0.0f, 1.0f, 0.0f))
+    //modelNode.addChildNode(placeNode)
+    placeNode.parent = anchorNode
+    anchorNode.addChildNode(placeNode)
+
     modelNode.addChildNode(boundingBoxNode)
     anchorNode.addChildNode(modelNode)
 
-    listOf(modelNode, anchorNode).forEach {
-        it.onEditingChanged = { editingTransforms ->
-            boundingBoxNode.isVisible = editingTransforms.isNotEmpty()
-        }
-    }
+    // Add the PlaceNode and set its position
+    /* val placeNode = PlaceNode(context, engine, nearbyPlaces[0])
+     placeNode.setPosition(Vector3(0.0f, 1.0f, 0.0f))*/ // Position the place name above the anchor
+
     return anchorNode
 }
+
+
+
+
+
 

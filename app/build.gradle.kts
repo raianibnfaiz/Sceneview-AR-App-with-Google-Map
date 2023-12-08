@@ -75,8 +75,10 @@ dependencies {
     implementation ("com.google.android.filament:filament-android:1.45.0")
     implementation ("com.google.android.filament:gltfio-android:1.45.0")
 
+    //Maps
     implementation ("com.google.android.gms:play-services-maps:18.2.0")
     implementation ("com.google.android.gms:play-services-location:21.0.1")
+    implementation ("com.google.maps.android:maps-utils-ktx:0.2")
 
     // Retrofit
     implementation ("com.squareup.retrofit2:retrofit:2.9.0")
